@@ -69,6 +69,8 @@ include("extensions.jl")
 include("anonymous.jl")
 include("fileio_interface.jl")
 
+include("read_direct.jl")
+
 using Base.Meta
 
 macro save(file, ks...)
