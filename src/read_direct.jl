@@ -6,11 +6,33 @@ end
 
 ParseCtx() = ParseCtx([], [], -1)
 
+struct ParseArrayIter{T <: IO}
+  io::T
+  ctx::ParseCtx
+end
+
+function Base.iterate(itr::ParseArrayIter)
+  len = read(itr.io, Int32)
+
+  iterate(itr, 0)
+end
+
+function Base.iterate(itr::ParseArrayIter, ::Int)
+  tag = read(itr.io, BSONType)
+  tag == eof && return nothing
+
+  while read(itr.io, UInt8) != 0x00 end
+
+  (parse_tag(itr.io, tag, itr.ctx), 0)
+end
+
 function skip_over(io::IO, tag::BSONType)
   len = if tag == document || tag == array
     read(io, Int32) - 4
-  elseif tag == string || tag == binary
+  elseif tag == string
     read(io, Int32)
+  elseif tag == binary
+    read(io, Int32) + 1
   elseif tag == null
     0
   else
@@ -104,29 +126,21 @@ end
 
 function parse_tuple(io::IO, data_pos::Int, ctx::ParseCtx)::Tuple
   endpos = position(io)
-
-  # seek past array length
-  seek(io, data_pos + 4)
-  size = 0
-
-  while (tag = read(io, BSONType)) ≠ eof
-    while read(io, UInt8) != 0x00 end
-    skip_over(io, tag)
-    size += 1
-  end
-
-  seek(io, data_pos + 4)
-  res = ntuple(size) do _
-    tag = read(io, BSONType)
-    while read(io, UInt8) != 0x00 end
-    parse_tag(io, tag, ctx)
-  end
-
+  seek(io, data_pos)
+  res = (ParseArrayIter(io, ctx)...,)
   seek(io, endpos)
   res
 end
 
-function parse_any_doc(io::IO, ctx::ParseCtx)
+function parse_svec(io::IO, data_pos::Int, ctx::ParseCtx)::Core.SimpleVector
+  endpos = position(io)
+  seek(io, data_pos)
+  res = Core.svec(ParseArrayIter(io, ctx)...)
+  seek(io, endpos)
+  res
+end
+
+function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
   len = read(io, Int32)
   dic = BSONDict()
 
@@ -226,7 +240,7 @@ function parse_doc(io::IO, ctx::ParseCtx)
     parse_tuple(io, tdata[2], ctx)
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_SVEC)
     @info "Found svec" tdata
-    (:svec, tdata)
+    parse_svec(io, tdata[2], ctx)
   elseif only_saw(SEEN_TAG | SEEN_TAG_UNION)
     Union{}
   elseif only_saw(SEEN_TAG | SEEN_TYPENAME | SEEN_PARAMS | SEEN_TAG_ANON)
@@ -239,6 +253,7 @@ function parse_doc(io::IO, ctx::ParseCtx)
     (:unionall, tvar, tbody)
   else
     # This doc doesn't appear to have any Julia type information
+    @info "Found plain dictionary"
     seek(io, start)
     parse_any_doc(io, ctx)
   end
