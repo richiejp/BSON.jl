@@ -37,7 +37,7 @@ function lower(v::DataType)
            :params => [v.parameters...])
 end
 
-constructtype(T, Ts) = (length(Ts) == 0) ? T : T{Ts...}
+constructtype(T, Ts) = isempty(Ts) ? T : T{Ts...}
 constructtype(T::Type{Tuple}, Ts) = T{Ts...}
 
 lower(v::UnionAll) =

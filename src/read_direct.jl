@@ -1,7 +1,14 @@
-struct ParseCtx
-  refindx::Vector{Pair{BSONType, Int}}
+struct BSONElem
+  tag::BSONType
+  pos::Int
+end
+
+BSONElem(tag::BSONType, io::IO) = BSONElem(tag, position(io))
+
+mutable struct ParseCtx
+  refindx::Vector{BSONElem}
   refs::Vector{Any}
-  cur_ref::Int
+  curref::Int32
 end
 
 ParseCtx() = ParseCtx([], [], -1)
@@ -24,6 +31,10 @@ function Base.iterate(itr::ParseArrayIter, ::Int)
   while read(itr.io, UInt8) != 0x00 end
 
   (parse_tag(itr.io, tag, itr.ctx), 0)
+end
+
+function Base.isempty(itr::ParseArrayIter)::Bool
+  read(itr.io, Int32) <= 5
 end
 
 function skip_over(io::IO, tag::BSONType)
@@ -64,7 +75,7 @@ function build_refs_indx!(io::IO, ctx::ParseCtx)
       while (tag = read(io, BSONType)) ≠ eof
         while read(io, UInt8) ≠ 0x00 end
 
-        push!(ctx.refindx, tag => position(io))
+        push!(ctx.refindx, BSONElem(tag, position(io)))
         push!(ctx.refs, nothing)
         skip_over(io, tag)
       end
@@ -74,26 +85,43 @@ function build_refs_indx!(io::IO, ctx::ParseCtx)
     end
   end
 
+  @info "Finished building refs index" ctx
   seek(io, 0)
+end
+
+function setref(obj::Any, ctx::ParseCtx)
+  if ctx.curref ≠ -1
+    @assert ctx.refs[ctx.curref] == nothing
+    ctx.refs[ctx.curref] = obj
+    ctx.curref = -1
+  end
+end
+
+function parse_bin(io::IO, ctx::ParseCtx)::Vector{UInt8}
+  len = read(io, Int32)
+  subtype = read(io, 1)
+  bin = read(io, len)
+  setref(bin, ctx)
+  bin
 end
 
 function parse_tag(io::IO, tag::BSONType, ctx::ParseCtx)
   if tag == null
-    nothing
+    @assert ctx.curref == -1
   elseif tag == document
     parse_doc(io, ctx)
   elseif tag == array
     parse_any_array(io, ctx)
   elseif tag == string
+    @assert ctx.curref == -1
     len = read(io, Int32)-1
     s = String(read(io, len))
     eof = read(io, 1)
     s
   elseif tag == binary
-    len = read(io, Int32)
-    subtype = read(io, 1)
-    read(io, len)
+    parse_bin(io, ctx)
   else
+    @assert ctx.curref == -1
     read(io, jtype(tag))
   end
 end
@@ -101,6 +129,7 @@ end
 function parse_any_array(io::IO, ctx::ParseCtx)::BSONArray
   len = read(io, Int32)
   ps = BSONArray()
+  setref(ps, ctx)
 
   while (tag = read(io, BSONType)) ≠ eof
     # Note that arrays are dicts with the index as the key
@@ -113,9 +142,60 @@ function parse_any_array(io::IO, ctx::ParseCtx)::BSONArray
   ps
 end
 
-function parse_symbol(io::IO, name_pos::Int, ctx::ParseCtx)::Symbol
-  endpos = position(io)
+function parse_backref(io::IO, ref::BSONElem, ctx::ParseCtx)
+  seek(io, ref.pos)
+  id = if ref.tag == int64
+    convert(Int32, read(io, Int64))
+  elseif ref.tag == int32
+    read(io, Int32)
+  else
+    error("Expecting Int type found: $ref_tag")
+  end
 
+  res = if ctx.refs[id] ≠ nothing
+    ctx.refs[id]
+  else
+    ctx.curref = id
+    obj = ctx.refindx[id]
+    seek(io, obj.pos)
+    ctx.refs[id] = parse_tag(io, obj.tag, ctx)
+  end
+
+  res
+end
+
+function parse_type(io::IO,
+                    name::BSONElem, params::BSONElem, ctx::ParseCtx)::Type
+  @assert name.tag == array && params.tag == array
+  seek(io, name.pos)
+  T = resolve(ParseArrayIter(io, ctx))
+  seek(io, params.pos)
+  constructtype(T, ParseArrayIter(io, ctx))
+end
+
+function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
+  # Save current ref incase T is a backref
+  curref = ctx.curref
+  ctx.curref = -1
+
+  seek(io, ttype.pos)
+  T::Type = parse_tag(io, ttype.tag, ctx)
+
+  if ismutable(T)
+    ctx.curref = curref
+  end
+
+  seek(io, data.pos)
+  if data.tag == binary
+    data = parse_bin(io, ctx)
+  elseif data.tag == array
+    data = ParseArrayIter(io, ctx)
+  else
+    error("Expected binary or array got $(data.tag)")
+  end
+end
+
+function parse_symbol(io::IO, name_pos::Int, ctx::ParseCtx)::Symbol
   seek(io, name_pos)
   len = read(io, Int32)-1
   s = Symbol(read(io, len))
@@ -125,7 +205,6 @@ function parse_symbol(io::IO, name_pos::Int, ctx::ParseCtx)::Symbol
 end
 
 function parse_tuple(io::IO, data_pos::Int, ctx::ParseCtx)::Tuple
-  endpos = position(io)
   seek(io, data_pos)
   res = (ParseArrayIter(io, ctx)...,)
   seek(io, endpos)
@@ -133,7 +212,6 @@ function parse_tuple(io::IO, data_pos::Int, ctx::ParseCtx)::Tuple
 end
 
 function parse_svec(io::IO, data_pos::Int, ctx::ParseCtx)::Core.SimpleVector
-  endpos = position(io)
   seek(io, data_pos)
   res = Core.svec(ParseArrayIter(io, ctx)...)
   seek(io, endpos)
@@ -143,6 +221,7 @@ end
 function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
   len = read(io, Int32)
   dic = BSONDict()
+  setref(dic, ctx)
 
   while (tag = read(io, BSONType)) ≠ eof
     k = Symbol(parse_cstr(io))
@@ -153,7 +232,7 @@ function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
 end
 
 function parse_doc(io::IO, ctx::ParseCtx)
-  start = position(io)
+  startpos = position(io)
   len = read(io, Int32)
 
   seen::Int64 = 0
@@ -162,7 +241,8 @@ function parse_doc(io::IO, ctx::ParseCtx)
   only_saw(it::Int64)::Bool = seen == it
 
   # First decide if this document is tagged with a Julia type. Saving the BSON tag types
-  local tref, tdata, ttype, ttypename, ttag, tname, tparams, tpath, tsize, tvar, tbody
+  local tref, tdata, ttype, ttypename, ttag, tname, tparams, tpath,
+        tsize, tvar, tbody
   local k::AbstractVector{UInt8}
 
   for _ in 1:6
@@ -185,34 +265,34 @@ function parse_doc(io::IO, ctx::ParseCtx)
 
     if k == b"ref"
       see(SEEN_REF)
-      tref = (tag, position(io))
+      tref = BSONElem(tag, io)
     elseif k == b"data"
       see(SEEN_DATA)
-      tdata = (tag, position(io))
+      tdata = BSONElem(tag, io)
     elseif k == b"type"
       see(SEEN_TYPE)
-      ttype = (tag, position(io))
+      ttype = BSONElem(tag, io)
     elseif k == b"typename"
       see(SEEN_TYPENAME)
-      ttypename = (tag, position(io))
+      ttypename = BSONElem(tag, io)
     elseif k == b"name"
       see(SEEN_NAME)
-      tname = (tag, position(io))
+      tname = BSONElem(tag, io)
     elseif k == b"params"
       see(SEEN_PARAMS)
-      tparams = (tag, position(io))
+      tparams = BSONElem(tag, io)
     elseif k == b"path"
       see(SEEN_PATH)
-      tpath = (tag, position(io))
+      tpath = BSONElem(tag, io)
     elseif k == b"size"
       see(SEEN_SIZE)
-      tsize = (tag, position(io))
+      tsize = BSONElem(tag, io)
     elseif k == b"var"
       see(SEEN_VAR)
-      tvar = (tag, position(io))
+      tvar = BSONElem(tag, io)
     elseif k == b"body"
       see(SEEN_BODY)
-      tbody = (tag, position(io))
+      tbody = BSONElem(tag, io)
     elseif k == b"_backrefs"
       nothing
     else
@@ -222,25 +302,26 @@ function parse_doc(io::IO, ctx::ParseCtx)
 
     skip_over(io, tag)
   end
+  endpos = position(io)
 
   ret = if only_saw(SEEN_TAG | SEEN_REF | SEEN_TAG_BACKREF)
     @info "Found backref" tref
-    (:backref, tref)
+    parse_backref(io, tref, ctx)
   elseif only_saw(SEEN_TAG | SEEN_TYPE | SEEN_DATA | SEEN_TAG_STRUCT)
     @info "Found Struct" ttype tdata
     (:struct, ttype, tdata)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_PARAMS | SEEN_TAG_DATATYPE)
     @info "Found Type" tname tparams
-    (:type, tname, tparams)
+    parse_type(io, tname, tparams, ctx)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_TAG_SYMBOL)
     @info "Found Symbol" tname
-    parse_symbol(io, tname[2], ctx)
+    parse_symbol(io, tname, ctx)
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_TUPLE)
     @info "Found Tuple" tdata
-    parse_tuple(io, tdata[2], ctx)
+    parse_tuple(io, tdata, ctx)
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_SVEC)
     @info "Found svec" tdata
-    parse_svec(io, tdata[2], ctx)
+    parse_svec(io, tdata, ctx)
   elseif only_saw(SEEN_TAG | SEEN_TAG_UNION)
     Union{}
   elseif only_saw(SEEN_TAG | SEEN_TYPENAME | SEEN_PARAMS | SEEN_TAG_ANON)
@@ -254,14 +335,19 @@ function parse_doc(io::IO, ctx::ParseCtx)
   else
     # This doc doesn't appear to have any Julia type information
     @info "Found plain dictionary"
-    seek(io, start)
+    seek(io, startpos)
     parse_any_doc(io, ctx)
   end
+
+  seek(io, endpos)
+  ret
 end
 
 function directtrip(ting::T) where {T}
   io = IOBuffer()
   bson(io, Dict(:stuff => ting))
   seek(io, 0)
-  parse_doc(io, ParseCtx())[:stuff]
+  ctx = ParseCtx()
+  build_refs_indx!(io, ctx)
+  parse_doc(io, ctx)[:stuff]
 end
