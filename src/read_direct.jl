@@ -34,7 +34,9 @@ function Base.iterate(itr::ParseArrayIter, ::Int)
 end
 
 function Base.isempty(itr::ParseArrayIter)::Bool
-  read(itr.io, Int32) <= 5
+  len = read(itr.io, Int32)
+  seek(itr.io, position(itr.io) - sizeof(Int32))
+  len <= 5
 end
 
 function skip_over(io::IO, tag::BSONType)
@@ -152,7 +154,7 @@ function parse_backref(io::IO, ref::BSONElem, ctx::ParseCtx)
     error("Expecting Int type found: $ref_tag")
   end
 
-  res = if ctx.refs[id] ≠ nothing
+  if ctx.refs[id] ≠ nothing
     ctx.refs[id]
   else
     ctx.curref = id
@@ -160,8 +162,6 @@ function parse_backref(io::IO, ref::BSONElem, ctx::ParseCtx)
     seek(io, obj.pos)
     ctx.refs[id] = parse_tag(io, obj.tag, ctx)
   end
-
-  res
 end
 
 function parse_type(io::IO,
@@ -180,42 +180,31 @@ function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
 
   seek(io, ttype.pos)
   T::Type = parse_tag(io, ttype.tag, ctx)
-
-  if ismutable(T)
-    ctx.curref = curref
-  end
-
+  @info "New struct type" T
   seek(io, data.pos)
-  if data.tag == binary
-    data = parse_bin(io, ctx)
-  elseif data.tag == array
-    data = ParseArrayIter(io, ctx)
+
+  if isprimitive(T)
+    @assert isbitstype(T)
+    @assert data.tag == binary
+    bits = parse_bin(io, ctx)
+    ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), T, bits)::T
   else
-    error("Expected binary or array got $(data.tag)")
+    @assert data.tag == array
+    x = ccall(:jl_new_struct_uninit, Any, (Any,), T)::T
+    if curref ≠ -1
+      ctx.refs[curref] = x
+    end
+
+    local p
+    for outer p = enumerate(ParseArrayIter(io, ctx))
+      (i, field) = p
+      f = convert(fieldtype(T, i), field)
+      ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, i-1, f)
+    end
+
+    @assert p[1] == fieldcount(T)
+    x
   end
-end
-
-function parse_symbol(io::IO, name_pos::Int, ctx::ParseCtx)::Symbol
-  seek(io, name_pos)
-  len = read(io, Int32)-1
-  s = Symbol(read(io, len))
-
-  seek(io, endpos)
-  s
-end
-
-function parse_tuple(io::IO, data_pos::Int, ctx::ParseCtx)::Tuple
-  seek(io, data_pos)
-  res = (ParseArrayIter(io, ctx)...,)
-  seek(io, endpos)
-  res
-end
-
-function parse_svec(io::IO, data_pos::Int, ctx::ParseCtx)::Core.SimpleVector
-  seek(io, data_pos)
-  res = Core.svec(ParseArrayIter(io, ctx)...)
-  seek(io, endpos)
-  res
 end
 
 function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
@@ -309,19 +298,23 @@ function parse_doc(io::IO, ctx::ParseCtx)
     parse_backref(io, tref, ctx)
   elseif only_saw(SEEN_TAG | SEEN_TYPE | SEEN_DATA | SEEN_TAG_STRUCT)
     @info "Found Struct" ttype tdata
-    (:struct, ttype, tdata)
+    parse_struct(io, ttype, tdata, ctx)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_PARAMS | SEEN_TAG_DATATYPE)
     @info "Found Type" tname tparams
     parse_type(io, tname, tparams, ctx)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_TAG_SYMBOL)
     @info "Found Symbol" tname
-    parse_symbol(io, tname, ctx)
+    seek(io, tname.pos)
+    len = read(io, Int32)-1
+    Symbol(read(io, len))
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_TUPLE)
     @info "Found Tuple" tdata
-    parse_tuple(io, tdata, ctx)
+    seek(io, tdata.pos)
+    (ParseArrayIter(io, ctx)...,)
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_SVEC)
     @info "Found svec" tdata
-    parse_svec(io, tdata, ctx)
+    seek(io, tdata.pos)
+    Core.svec(ParseArrayIter(io, ctx)...)
   elseif only_saw(SEEN_TAG | SEEN_TAG_UNION)
     Union{}
   elseif only_saw(SEEN_TAG | SEEN_TYPENAME | SEEN_PARAMS | SEEN_TAG_ANON)
