@@ -272,13 +272,12 @@ function parse_doc(io::IO, ctx::ParseCtx)
     @info "Read key" String(k)
 
     if k == b"tag"
-      see(SEEN_TAG)
       if tag == string && (dtag = parse_doc_tag(io)) isa Int64
         @info "Read tag" dtag
-        see(dtag)
+        see(SEEN_TAG | dtag)
         continue
       else
-        break
+        @goto FALLBACK
       end
     end
 
@@ -315,8 +314,7 @@ function parse_doc(io::IO, ctx::ParseCtx)
     elseif k == b"_backrefs"
       nothing
     else
-      see(SEEN_OTHER)
-      break
+      @goto FALLBACK
     end
 
     skip_over(io, tag)
@@ -356,14 +354,17 @@ function parse_doc(io::IO, ctx::ParseCtx)
   elseif only_saw(SEEN_TAG | SEEN_VAR | SEEN_BODY | SEEN_TAG_UNIONALL)
     (:unionall, tvar, tbody)
   else
-    # This doc doesn't appear to have any Julia type information
-    @info "Found plain dictionary"
-    seek(io, startpos)
-    parse_any_doc(io, ctx)
+    @goto FALLBACK
   end
 
   seek(io, endpos)
-  ret
+  return ret
+
+  @label FALLBACK
+  @info "Found plain dictionary"
+  # This doc doesn't appear to be tagged with all the necessay julia type info
+  seek(io, startpos)
+  parse_any_doc(io, ctx)
 end
 
 function directtrip(ting::T) where {T}
@@ -372,5 +373,10 @@ function directtrip(ting::T) where {T}
   seek(io, 0)
   ctx = ParseCtx()
   build_refs_indx!(io, ctx)
-  parse_doc(io, ctx)[:stuff]
+  try
+    parse_doc(io, ctx)[:stuff]
+  catch e
+    @error "Error during parsing" io ctx
+    rethrow(e)
+  end
 end
