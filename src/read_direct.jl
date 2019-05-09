@@ -128,6 +128,15 @@ function parse_tag(io::IO, tag::BSONType, ctx::ParseCtx)
   end
 end
 
+function parse_type(io::IO,
+                    name::BSONElem, params::BSONElem, ctx::ParseCtx)::Type
+  @assert name.tag == array && params.tag == array
+  seek(io, name.pos)
+  T = resolve(ParseArrayIter(io, ctx))
+  seek(io, params.pos)
+  constructtype(T, ParseArrayIter(io, ctx))
+end
+
 function parse_any_array(io::IO, ctx::ParseCtx)::BSONArray
   len = read(io, Int32)
   ps = BSONArray()
@@ -142,6 +151,36 @@ function parse_any_array(io::IO, ctx::ParseCtx)::BSONArray
   end
 
   ps
+end
+
+function parse_array(io::IO, ttype::BSONElem, size::BSONElem,
+                     data::BSONElem, ctx::ParseCtx)::AbstractArray
+  # Save current ref incase T is a backref
+  curref = ctx.curref
+  ctx.curref = -1
+
+  seek(io, ttype.pos)
+  T::Type = parse_tag(io, ttype.tag, ctx)
+  @info "New array type" T
+
+  seek(io, size.pos)
+  sizes = (ParseArrayIter(io, ctx)...,)
+  if isbitstype(T)
+    if sizeof(T) == 0
+      fill(T(), sizes...)
+    else
+      @assert data.tag == binary
+      seek(io, data.pos)
+      reshape(T[reinterpret(T, parse_bin(io, ctx))...], sizes...)
+    end
+  else
+    arr = T[ParseArrayIter(io, ctx)...]
+    if length(sizes) == 1
+      arr
+    else
+      Array{T}(reshape(arr, sizes...))
+    end
+  end
 end
 
 function parse_backref(io::IO, ref::BSONElem, ctx::ParseCtx)
@@ -162,15 +201,6 @@ function parse_backref(io::IO, ref::BSONElem, ctx::ParseCtx)
     seek(io, obj.pos)
     ctx.refs[id] = parse_tag(io, obj.tag, ctx)
   end
-end
-
-function parse_type(io::IO,
-                    name::BSONElem, params::BSONElem, ctx::ParseCtx)::Type
-  @assert name.tag == array && params.tag == array
-  seek(io, name.pos)
-  T = resolve(ParseArrayIter(io, ctx))
-  seek(io, params.pos)
-  constructtype(T, ParseArrayIter(io, ctx))
 end
 
 function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
@@ -322,7 +352,7 @@ function parse_doc(io::IO, ctx::ParseCtx)
   elseif only_saw(SEEN_TAG | SEEN_PATH | SEEN_TAG_REF)
     (:ref, tpath)
   elseif only_saw(SEEN_TAG | SEEN_TYPE | SEEN_SIZE | SEEN_DATA | SEEN_TAG_ARRAY)
-    (:array, ttype, tsize, tdata)
+    parse_array(io, ttype, tsize, tdata, ctx)
   elseif only_saw(SEEN_TAG | SEEN_VAR | SEEN_BODY | SEEN_TAG_UNIONALL)
     (:unionall, tvar, tbody)
   else
