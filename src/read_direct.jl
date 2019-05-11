@@ -16,28 +16,29 @@ ParseCtx() = ParseCtx([], [], -1)
 struct ParseArrayIter{T <: IO}
   io::T
   ctx::ParseCtx
+  len::Int
 end
 
-function Base.iterate(itr::ParseArrayIter)
-  len = read(itr.io, Int32)
+ParseArrayIter(io, ctx) =
+  ParseArrayIter(io, ctx, Int(read(io, Int32)) - 4)
 
-  iterate(itr, 0)
-end
+Base.iterate(itr::ParseArrayIter) = iterate(itr, 0)
 
-function Base.iterate(itr::ParseArrayIter, ::Int)
+function Base.iterate(itr::ParseArrayIter, len::Int)
+  startpos = position(itr.io)
   tag = read(itr.io, BSONType)
-  tag == eof && return nothing
+  if tag == eof
+    @assert len + sizeof(BSONType) == itr.len
+    return nothing
+  end
 
   while read(itr.io, UInt8) != 0x00 end
 
-  (parse_tag(itr.io, tag, itr.ctx), 0)
+  obj = parse_tag(itr.io, tag, itr.ctx)
+  (obj, len + position(itr.io) - startpos)
 end
 
-function Base.isempty(itr::ParseArrayIter)::Bool
-  len = read(itr.io, Int32)
-  seek(itr.io, position(itr.io) - sizeof(Int32))
-  len <= 5
-end
+Base.isempty(itr::ParseArrayIter) = itr.len == 1
 
 function skip_over(io::IO, tag::BSONType)
   len = if tag == document || tag == array
@@ -53,18 +54,18 @@ function skip_over(io::IO, tag::BSONType)
   end
 
   seek(io, position(io) + len)
-  @info "Skipped" tag len position(io)
+  #@info "Skipped" tag len position(io)
 end
 
 "Create an index into the _backrefs entry in the root document"
 function build_refs_indx!(io::IO, ctx::ParseCtx)
   # read the length of the root document
   len = read(io, Int32)
-  @info "BSON document is $len bytes"
+  #@info "BSON document is $len bytes"
 
   while (tag = read(io, BSONType)) ≠ eof
     name = parse_cstr_unsafe(io)
-    @info "Element head" String(name) tag position(io)
+    #@info "Element head" String(name) tag position(io)
 
     if name == b"_backrefs"
       if tag != array
@@ -72,7 +73,7 @@ function build_refs_indx!(io::IO, ctx::ParseCtx)
       end
 
       len = read(io, Int32)
-      @info "Processing _backrefs" position(io) len
+      #@info "Processing _backrefs" position(io) len
 
       while (tag = read(io, BSONType)) ≠ eof
         while read(io, UInt8) ≠ 0x00 end
@@ -82,21 +83,23 @@ function build_refs_indx!(io::IO, ctx::ParseCtx)
         skip_over(io, tag)
       end
     else
-      @info "Skipping $(String(name))"
+      #@info "Skipping $(String(name))"
       skip_over(io, tag)
     end
   end
 
-  @info "Finished building refs index" ctx
+  #@info "Finished building refs index" ctx
   seek(io, 0)
 end
 
-function setref(obj::Any, ctx::ParseCtx)
+function setref(obj, ctx::ParseCtx)
   if ctx.curref ≠ -1
     @assert ctx.refs[ctx.curref] == nothing
     ctx.refs[ctx.curref] = obj
     ctx.curref = -1
   end
+
+  obj
 end
 
 function parse_bin(io::IO, ctx::ParseCtx)::Vector{UInt8}
@@ -131,10 +134,15 @@ end
 function parse_type(io::IO,
                     name::BSONElem, params::BSONElem, ctx::ParseCtx)::Type
   @assert name.tag == array && params.tag == array
+  curref = ctx.curref
+  ctx.curref = -1
+
   seek(io, name.pos)
   T = resolve(ParseArrayIter(io, ctx))
+  #@info "Union all type" T
   seek(io, params.pos)
-  constructtype(T, ParseArrayIter(io, ctx))
+  ctx.curref = curref
+  setref(constructtype(T, ParseArrayIter(io, ctx)), ctx)
 end
 
 function parse_any_array(io::IO, ctx::ParseCtx)::BSONArray
@@ -161,25 +169,36 @@ function parse_array(io::IO, ttype::BSONElem, size::BSONElem,
 
   seek(io, ttype.pos)
   T::Type = parse_tag(io, ttype.tag, ctx)
-  @info "New array type" T
+  #@info "New array type" T
+
+  ctx.curref = curref
 
   seek(io, size.pos)
   sizes = (ParseArrayIter(io, ctx)...,)
+
+  seek(io, data.pos)
   if isbitstype(T)
-    if sizeof(T) == 0
+    arr = if sizeof(T) == 0
       fill(T(), sizes...)
     else
       @assert data.tag == binary
-      seek(io, data.pos)
       reshape(T[reinterpret(T, parse_bin(io, ctx))...], sizes...)
     end
+
+    setref(arr, ctx)
   else
-    arr = T[ParseArrayIter(io, ctx)...]
-    if length(sizes) == 1
-      arr
-    else
-      Array{T}(reshape(arr, sizes...))
+    arr = setref(Array{T}(undef, sizes...), ctx)
+    bsonarr = ParseArrayIter(io, ctx)
+
+    if (itr = iterate(bsonarr)) ≠ nothing
+      for (i, len) = enumerate(sizes), j = 1:len
+        (elem, s) = itr
+        arr[i, j] = elem
+        itr = iterate(bsonarr, s)
+      end
     end
+
+    arr
   end
 end
 
@@ -210,20 +229,27 @@ function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
 
   seek(io, ttype.pos)
   T::Type = parse_tag(io, ttype.tag, ctx)
-  @info "New struct type" T
+  #@info "New struct type" T
+
   seek(io, data.pos)
+  ctx.curref = curref
 
   if isprimitive(T)
     @assert isbitstype(T)
     @assert data.tag == binary
     bits = parse_bin(io, ctx)
     ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), T, bits)::T
+  elseif T <: Dict
+    d = setref(T(), ctx)
+
+    for (k, v) in zip(ParseArrayIter(io, ctx)...)
+      d[k] = v
+    end
+
+    d
   else
     @assert data.tag == array
-    x = ccall(:jl_new_struct_uninit, Any, (Any,), T)::T
-    if curref ≠ -1
-      ctx.refs[curref] = x
-    end
+    x = setref(ccall(:jl_new_struct_uninit, Any, (Any,), T), ctx)
 
     local p
     for outer p = enumerate(ParseArrayIter(io, ctx))
@@ -232,15 +258,14 @@ function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
       ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, i-1, f)
     end
 
-    @assert p[1] == fieldcount(T)
+    @assert p[1] == fieldcount(T) "$(p[1]) ≠ $(fieldcount(T))"
     x
   end
 end
 
 function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
   len = read(io, Int32)
-  dic = BSONDict()
-  setref(dic, ctx)
+  dic = setref(BSONDict(), ctx)
 
   while (tag = read(io, BSONType)) ≠ eof
     k = Symbol(parse_cstr(io))
@@ -269,11 +294,11 @@ function parse_doc(io::IO, ctx::ParseCtx)
       break
     end
     k = parse_cstr_unsafe(io)
-    @info "Read key" String(k)
+    #@info "Read key" String(k)
 
     if k == b"tag"
       if tag == string && (dtag = parse_doc_tag(io)) isa Int64
-        @info "Read tag" dtag
+        #@info "Read tag" dtag
         see(SEEN_TAG | dtag)
         continue
       else
@@ -322,25 +347,25 @@ function parse_doc(io::IO, ctx::ParseCtx)
   endpos = position(io)
 
   ret = if only_saw(SEEN_TAG | SEEN_REF | SEEN_TAG_BACKREF)
-    @info "Found backref" tref
+    #@info "Found backref" tref
     parse_backref(io, tref, ctx)
   elseif only_saw(SEEN_TAG | SEEN_TYPE | SEEN_DATA | SEEN_TAG_STRUCT)
-    @info "Found Struct" ttype tdata
+    #@info "Found Struct" ttype tdata
     parse_struct(io, ttype, tdata, ctx)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_PARAMS | SEEN_TAG_DATATYPE)
-    @info "Found Type" tname tparams
+    #@info "Found Type" tname tparams
     parse_type(io, tname, tparams, ctx)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_TAG_SYMBOL)
-    @info "Found Symbol" tname
+    #@info "Found Symbol" tname
     seek(io, tname.pos)
     len = read(io, Int32)-1
     Symbol(read(io, len))
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_TUPLE)
-    @info "Found Tuple" tdata
+    #@info "Found Tuple" tdata
     seek(io, tdata.pos)
     (ParseArrayIter(io, ctx)...,)
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_SVEC)
-    @info "Found svec" tdata
+    #@info "Found svec" tdata
     seek(io, tdata.pos)
     Core.svec(ParseArrayIter(io, ctx)...)
   elseif only_saw(SEEN_TAG | SEEN_TAG_UNION)
@@ -361,10 +386,16 @@ function parse_doc(io::IO, ctx::ParseCtx)
   return ret
 
   @label FALLBACK
-  @info "Found plain dictionary"
+  #@info "Found plain dictionary"
   # This doc doesn't appear to be tagged with all the necessay julia type info
   seek(io, startpos)
   parse_any_doc(io, ctx)
+end
+
+function direct_parse(io::IO)
+  ctx = ParseCtx()
+  build_refs_indx!(io, ctx)
+  parse_doc(io, ctx)
 end
 
 function directtrip(ting::T) where {T}
