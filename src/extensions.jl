@@ -50,8 +50,12 @@ lower(v::UnionAll) =
 lower(x::Vector{Any}) = copy(x)
 lower(x::Vector{UInt8}) = x
 
-reinterpret_(::Type{T}, x) where T =
-    T[_x for _x in reinterpret(T, x)]
+function reinterpret_(::Type{T}, x) where T
+  len = Int(length(x) * (sizeof(eltype(x)) / sizeof(T)))
+  GC.@preserve x begin
+    return unsafe_wrap(Array, Ptr{T}(pointer(x)), len; own=true)
+  end
+end
 
 function lower(x::Array)
   ndims(x) == 1 && !isbitstype(eltype(x)) && return Any[x...]
