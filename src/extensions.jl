@@ -61,7 +61,7 @@ end
 
 # Structs
 
-isprimitive(T) = fieldcount(T) == 0 && T.size > 0
+isprimitive(T::Type)::Bool = fieldcount(T) == 0 && T.size > 0
 
 structdata(x) = isprimitive(typeof(x)) ? reinterpret_(UInt8, [x]) :
     Any[getfield(x, f) for f in fieldnames(typeof(x))]
@@ -75,12 +75,7 @@ initstruct(T) = ccall(:jl_new_struct_uninit, Any, (Any,), T)
 function newstruct!(x, fs...)
   #@debug "newstruct!" typeof(x) fs
   for (i, f) = enumerate(fs)
-    try
-      f = convert(fieldtype(typeof(x),i), f)
-    catch e
-      #@debug "newstruct!" i typeof(x) fieldtype(typeof(x), i)
-      rethrow(e)
-    end
+    f = convert(fieldtype(typeof(x),i), f)
     ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, i-1, f)
   end
   return x
