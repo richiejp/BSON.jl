@@ -395,7 +395,7 @@ function load_bits_array(io::IO, ::Type{T}, sizes,
       fill(T(), sizes...)
     else
       @asserteq data.tag binary
-      reshape(T[reinterpret(T, parse_bin(io, ctx))...], sizes...)
+      reshape(reinterpret_(T, parse_bin(io, ctx)), sizes...)
     end
 
     setref(arr, ctx)
