@@ -52,7 +52,7 @@ function Base.iterate(itr::ParseArrayIter{IOT, E},
 
   while read(itr.io, UInt8) != 0x00 end
 
-  obj = parse_specific(itr.io, E, tag, itr.ctx)
+  obj = parse_specific(itr.io, E, tag, itr.ctx)::E
   (obj, len + position(itr.io) - startpos)
 end
 
@@ -208,7 +208,7 @@ function parse_specific(io::IO, ::Type{T}, tag::BSONType,
 
   if @generated
     if !isconcretetype(T)
-      return :(parse_tag(io, tag, ctx))
+      return :(parse_tag(io, tag, ctx)::$T)
     end
 
     expr = quote
@@ -241,7 +241,7 @@ function parse_specific(io::IO, ::Type{T}, tag::BSONType,
       @asserteq (startpos + len) endpos
 
       if ref ≠ nothing
-        ret = parse_specific_ref(io, $T, ref, ctx)
+        ret = parse_specific_ref(io, $T, ref, ctx)::$T
         seek(io, endpos)
         return ret
       end
@@ -273,7 +273,7 @@ function parse_specific(io::IO, ::Type{T}, tag::BSONType,
       #@info "Loaded" $T;
       ret)
   else
-    parse_tag(io::IO, tag, ctx)
+    parse_tag(io::IO, tag, ctx)::T
   end
 end
 
@@ -452,13 +452,14 @@ function parse_specific_ref(io::IO, ::Type{T}, ref::BSONElem,
     error("Expecting Int type found: $ref_tag")
   end
 
-  if ctx.refs[id] ≠ nothing
-    ctx.refs[id]
+  ret = ctx.refs[id]::Union{Nothing, T}
+  if ret ≠ nothing
+    ret
   else
     ctx.curref = id
     obj = ctx.refindx[id]
     seek(io, obj.pos)
-    ctx.refs[id] = parse_specific(io, T, obj.tag, ctx)
+    ctx.refs[id] = parse_specific(io, T, obj.tag, ctx)::T
   end
 end
 
@@ -472,10 +473,10 @@ function load_dict!(io::IOT, d::Dict{K, V},
 
   parse_array_len(io, ctx)
   tag = parse_array_tag(io, ctx)
-  ks = parse_specific(io, Vector{K}, tag, ctx)
+  ks = parse_specific(io, Vector{K}, tag, ctx)::Vector{K}
 
   tag = parse_array_tag(io, ctx)
-  vs = parse_specific(io, Vector{V}, tag, ctx)
+  vs = parse_specific(io, Vector{V}, tag, ctx)::Vector{V}
 
   for (k, v) in zip(ks, vs)
       d[k] = v
@@ -496,13 +497,13 @@ function load_struct!(io::IO, x::T, ctx::ParseCtx)::T where T
     FT = fieldtype(T, 1)
 
     block = :(tag = parse_array_tag(io, ctx);
-              f = parse_specific(io, $FT, tag, ctx);
+              f = parse_specific(io, $FT, tag, ctx)::$FT;
               ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, 0, f))
     for i in 2:n
       FT = fieldtype(T, i)
       block = :($block;
                 tag = parse_array_tag(io, ctx);
-                f = parse_specific(io, $FT, tag, ctx);
+                f = parse_specific(io, $FT, tag, ctx)::$FT;
                 ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, $i-1, f))
     end
 
