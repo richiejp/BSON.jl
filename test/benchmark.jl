@@ -78,10 +78,10 @@ function do_bench()
   @bench hist "Bench Save BSON" bson(io, foos)
   seek(io, 0)
 
-  doc = @bench hist "Bench inter load BSON Document" BSON.load(io)
+  doc = @bench hist "Bench inter load BSON Document" BSON.load_compat(io)
   seek(io, 0)
   GC.gc()
-  rfoos = @bench hist "Bench direct load BSON Document" BSON.direct_parse(io)
+  rfoos = @bench hist "Bench direct load BSON Document" BSON.load(io)
 
   # Sanity check the results
   rfoos[:Foo][1]::Foo
@@ -124,7 +124,7 @@ function do_profile()
   GC.gc()
   seek(io, 0)
   @info "Profile direct parse"
-  dict = @profile BSON.direct_parse(io)
+  dict = @profile BSON.load(io)
   Profile.print(;noisefloor=2, mincount=minc, C=true)
 end
 
@@ -133,11 +133,11 @@ function profile_load(obj)
   bson(io, Dict(:stuff => obj))
 
   seek(io, 0)
-  BSON.direct_parse(io)
+  BSON.load(io)
   Profile.clear()
   @profile for _ in 1:100
     seek(io, 0)
-    BSON.direct_parse(io)
+    BSON.load(io)
   end
 end
 

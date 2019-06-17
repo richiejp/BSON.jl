@@ -657,13 +657,13 @@ function parse_doc(io::IO, ctx::ParseCtx)
   elseif only_saw(SEEN_TAG | SEEN_TAG_UNION)
     Union{}
   elseif only_saw(SEEN_TAG | SEEN_TYPENAME | SEEN_PARAMS | SEEN_TAG_ANON)
-    (:anonymous, ttypename, tparams)
+    error("Anon functions not implemented")
   elseif only_saw(SEEN_TAG | SEEN_PATH | SEEN_TAG_REF)
-    (:ref, tpath)
+    error("Refs not implemented")
   elseif only_saw(SEEN_TAG | SEEN_TYPE | SEEN_SIZE | SEEN_DATA | SEEN_TAG_ARRAY)
     parse_array(io, ttype, tsize, tdata, ctx)
   elseif only_saw(SEEN_TAG | SEEN_VAR | SEEN_BODY | SEEN_TAG_UNIONALL)
-    (:unionall, tvar, tbody)
+    error("Unionall not implemented")
   else
     @goto FALLBACK
   end
@@ -678,11 +678,15 @@ function parse_doc(io::IO, ctx::ParseCtx)
   parse_any_doc(io, ctx)
 end
 
-function direct_parse(io::IO)
-  ctx = ParseCtx()
+function parse(io::IO, ctx::ParseCtx)
   build_refs_indx!(io, ctx)
   parse_doc(io, ctx)
 end
+parse(path::String, ctx::ParseCtx) = open(path) do io
+  parse(io, ctx)
+end
+
+load(x) = parse(x, ParseCtx())
 
 function directtrip(ting::T) where {T}
   io = IOBuffer()

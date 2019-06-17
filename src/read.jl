@@ -289,7 +289,7 @@ end
 parse(io::IOT) where {IOT <: IO} = backrefs!(parse_doc(io))
 parse(path::String) = open(parse, path)
 
-load(x) = raise_recursive(parse(x), IdDict{Any, Any}())
+load_compat(x) = raise_recursive(parse(x), IdDict{Any, Any}())
 
 function roundtrip(x)
   buf = IOBuffer()
