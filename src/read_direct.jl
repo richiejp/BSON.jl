@@ -208,7 +208,7 @@ function parse_specific(io::IO, ::Type{T}, tag::BSONType,
 
   if @generated
     if !isconcretetype(T)
-      return :(parse_tag(io, tag, ctx)::$T)
+      return :(parse_tag(io, tag, ctx))
     end
 
     expr = quote
@@ -247,31 +247,10 @@ function parse_specific(io::IO, ::Type{T}, tag::BSONType,
       end
 
       seek(io, data.pos)
+      ret = load_struct(io, $T, data.tag, ctx)
+      seek(io, endpos)
+      ret
     end
-
-    expr = if isprimitive(T)
-      @assert isbitstype(T)
-      quote
-        $expr
-        @asserteq data.tag binary
-        bits = parse_bin(io, ctx)
-        ret = ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), $T, bits)
-      end
-    elseif T <: Dict
-      :($expr; ret = load_dict!(io, $T(), ctx))
-    elseif fieldcount(T) < 1
-      :($expr; ret = $T())
-    else
-      quote
-        $expr
-        ret = load_struct!(io, ccall(:jl_new_struct_uninit, Any, (Any,), $T), ctx)
-      end
-    end
-
-    :($expr;
-      seek(io, endpos);
-      #@info "Loaded" $T;
-      ret)
   else
     parse_tag(io::IO, tag, ctx)::T
   end
@@ -485,38 +464,68 @@ function load_dict!(io::IOT, d::Dict{K, V},
   d
 end
 
-function load_struct!(io::IO, x::T, ctx::ParseCtx)::T where T
-  setref(x, ctx)
+function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where T
   #@info "Load struct" T
 
-  parse_array_len(io, ctx)
-
   if @generated
-    n = fieldcount(T)
-    @assert n > 0
-    FT = fieldtype(T, 1)
+    expr = if isprimitive(T)
+      @assert isbitstype(T)
+      quote
+        $expr
+        @asserteq dtag binary
+        bits = parse_bin(io, ctx)
+        ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), $T, bits)
+      end
+    elseif T <: Dict
+      :($expr; load_dict!(io, $T(), ctx))
+    elseif fieldcount(T) < 1
+      :($expr; $T())
+    else
+      n = fieldcount(T)
+      @assert n > 0
+      FT = fieldtype(T, 1)
 
-    block = :(tag = parse_array_tag(io, ctx);
-              f = parse_specific(io, $FT, tag, ctx)::$FT;
-              ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, 0, f))
-    for i in 2:n
-      FT = fieldtype(T, i)
-      block = :($block;
+      block = :(x = ccall(:jl_new_struct_uninit, Any, (Any,), $T);
+                setref(x, ctx);
+                parse_array_len(io, ctx);
                 tag = parse_array_tag(io, ctx);
                 f = parse_specific(io, $FT, tag, ctx)::$FT;
-                ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, $i-1, f))
-    end
+                ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, 0, f))
+      for i in 2:n
+        FT = fieldtype(T, i)
+        block = :($block;
+                  tag = parse_array_tag(io, ctx);
+                  f = parse_specific(io, $FT, tag, ctx)::$FT;
+                  ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, $i-1, f))
+      end
 
-    :($block; x)
+      :($block; x)
+    end
   else
-    for i in 1:nfields(x)
-      tag = parse_array_tag(io, ctx)
-      field = parse_tag(io, tag, ctx)
-      f = convert(fieldtype(T, i), field)
-      ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, i-1, f)
-    end
+    if isprimitive(T)
+      @assert isbitstype(T)
+      @asserteq dtag binary
+      bits = parse_bin(io, ctx)
+      ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), T, bits)
+    elseif T <: Dict
+      load_dict!(io, T(), ctx)
+    elseif fieldcount(T) < 1
+      T()
+    else
+      @asserteq dtag array
 
-    x
+      x = ccall(:jl_new_struct_uninit, Any, (Any,), T)
+      setref(x, ctx)
+
+      for i in 1:nfields(x)
+        tag = parse_array_tag(io, ctx)
+        field = parse_tag(io, tag, ctx)
+        f = convert(fieldtype(T, i), field)
+        ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, i-1, f)
+      end
+
+      x
+    end
   end
 end
 
@@ -533,19 +542,7 @@ function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
   seek(io, data.pos)
   ctx.curref = curref
 
-  if isprimitive(T)
-    @assert isbitstype(T)
-    @asserteq data.tag binary
-    bits = parse_bin(io, ctx)
-    ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), T, bits)
-  elseif T <: Dict
-    load_dict!(io, T(), ctx)
-  elseif fieldcount(T) < 1
-    T()
-  else
-    @asserteq data.tag array
-    load_struct!(io, ccall(:jl_new_struct_uninit, Any, (Any,), T), ctx)
-  end
+  load_struct(io, T, data.tag, ctx)
 end
 
 function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
