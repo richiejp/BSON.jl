@@ -3,7 +3,7 @@ module Benchmark
 using Profile
 using BSON
 
-export do_bench, do_profile
+export do_bench, do_profile, profile_load, Foo, Bar, Baz
 
 chars = [x for x in '0':'z']
 strings = [String([rand(chars) for _ in 1:20]) for _ in 1:1000]
@@ -71,17 +71,17 @@ function do_bench()
 
   foos = Dict(:Foo => Foo(), :Foo2 => Foo(), :Foo3 => Foo())
 
-  @bench hist "Roundtrip from cold start (ignore)" BSON.roundtrip(foos)
+  #@bench hist "Roundtrip from cold start (ignore)" BSON.roundtrip(foos)
 
   io = IOBuffer()
 
   @bench hist "Bench Save BSON" bson(io, foos)
   seek(io, 0)
 
-  doc = @bench hist "Bench Parse BSON Document" BSON.parse_doc(io)
-  dref_doc = deepcopy(doc)
-  dref_doc = @bench hist "Bench deref" BSON.backrefs!(dref_doc)
-  rfoos = @bench hist "Bench Raise BSON to Julia types" BSON.raise_recursive(dref_doc, IdDict{Any, Any}())
+  doc = @bench hist "Bench inter load BSON Document" BSON.load(io)
+  seek(io, 0)
+  GC.gc()
+  rfoos = @bench hist "Bench direct load BSON Document" BSON.direct_parse(io)
 
   # Sanity check the results
   rfoos[:Foo][1]::Foo
@@ -103,23 +103,42 @@ function do_profile()
   Profile.clear()
   seek(io, 0)
 
-  GC.gc()
-  @info "Profile Parse BSON Document"
-  dict = @profile BSON.parse_doc(io)
-  Profile.print(;noisefloor=2, mincount=minc, C=true)
-  Profile.clear()
+  # GC.gc()
+  # @info "Profile Parse BSON Document"
+  # dict = @profile BSON.parse_doc(io)
+  # Profile.print(;noisefloor=2, mincount=minc, C=true)
+  # Profile.clear()
+
+  # GC.gc()
+  # @info "Profile deref"
+  # dict = @profile BSON.backrefs!(dict)
+  # Profile.print(;noisefloor=2, mincount=minc, C=true)
+  # Profile.clear()
+  
+  # GC.gc()
+  # @info "Profile Raise BSON to Julia types"
+  # rfoos = @profile BSON.raise_recursive(dict, IdDict{Any, Any}())
+  # Profile.print(;noisefloor=2, mincount=minc, C=true)
+  # Profile.clear()
 
   GC.gc()
-  @info "Profile deref"
-  dict = @profile BSON.backrefs!(dict)
+  seek(io, 0)
+  @info "Profile direct parse"
+  dict = @profile BSON.direct_parse(io)
   Profile.print(;noisefloor=2, mincount=minc, C=true)
+end
+
+function profile_load(obj)
+  io = IOBuffer()
+  bson(io, Dict(:stuff => obj))
+
+  seek(io, 0)
+  BSON.direct_parse(io)
   Profile.clear()
-  
-  GC.gc()
-  @info "Profile Raise BSON to Julia types"
-  rfoos = @profile BSON.raise_recursive(dict, IdDict{Any, Any}())
-  Profile.print(;noisefloor=2, mincount=minc, C=true)
-  Profile.clear()
+  @profile for _ in 1:100
+    seek(io, 0)
+    BSON.direct_parse(io)
+  end
 end
 
 end
