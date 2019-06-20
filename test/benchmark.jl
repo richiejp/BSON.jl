@@ -1,7 +1,9 @@
 module Benchmark
 
 using Profile
-using BSON
+using BSONqs
+
+const BSON = BSONqs
 
 export do_bench, do_profile, profile_load, Foo, Bar, Baz
 

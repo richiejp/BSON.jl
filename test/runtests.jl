@@ -1,5 +1,7 @@
-using BSON
+using BSONqs
 using Test
+
+const BSON = BSONqs
 
 roundtrip_equal(x) = BSON.roundtrip(x) == x
 

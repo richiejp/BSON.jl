@@ -1,4 +1,4 @@
-module BSON
+module BSONqs
 
 using Core: SimpleVector, TypeName
 export bson
