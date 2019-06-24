@@ -446,8 +446,8 @@ function parse_backref(io::IO, ref::BSONElem, ctx::ParseCtx)
   parse_specific_ref(io, Any, ref, ctx)
 end
 
-function load_dict!(io::IOT, d::Dict{K, V},
-                    ctx::ParseCtx) where {K, V, IOT <: IO}
+function load_dict!(io::IO, d::Dict{K, V},
+                    ctx::ParseCtx) where {K, V}
   setref(d, ctx)
 
   parse_array_len(io, ctx)
@@ -459,6 +459,20 @@ function load_dict!(io::IOT, d::Dict{K, V},
 
   for (k, v) in zip(ks, vs)
       d[k] = v
+  end
+
+  d
+end
+
+function load_dict!(io::IO, d::Dict{K, Nothing},
+                    ctx::ParseCtx) where K
+  setref(d, ctx)
+
+  parse_array_len(io, ctx)
+  tag = parse_array_tag(io, ctx)
+
+  for k in parse_specific(io, Vector{K}, tag, ctx)::Vector{K}
+      d[k] = nothing
   end
 
   d
