@@ -3,7 +3,7 @@ using Test
 
 const BSON = BSONqs
 
-roundtrip_equal(x) = BSON.roundtrip(x) == x
+roundtrip_equal(x; compat = false) = BSON.roundtrip(x; compat = compat) == x
 
 abstract type Bar end
 
@@ -28,18 +28,18 @@ struct Baz <: Bar end
   @test roundtrip_equal(UInt8[1,2,3])
   @test roundtrip_equal("b")
   @test roundtrip_equal([1,"b"])
-  @test roundtrip_equal(Tuple)
+  @test roundtrip_equal(Tuple; compat=true)
 end
 
 @testset "Complex Types" begin
   @test roundtrip_equal(:foo)
   @test roundtrip_equal(Int64)
   @test roundtrip_equal(Complex{Float32})
-  @test roundtrip_equal(Complex)
-  @test roundtrip_equal(Array)
+  @test roundtrip_equal(Complex; compat=true)
+  @test roundtrip_equal(Array; compat=true)
   @test roundtrip_equal([1,2,3])
   @test roundtrip_equal(rand(2,3))
-  @test roundtrip_equal(Array{Real}(rand(2,3)))
+  @test roundtrip_equal(Array{Real}(rand(2,3)); compat=true)
   @test roundtrip_equal(1+2im)
   @test roundtrip_equal(Nothing[])
   @test roundtrip_equal(S[])
@@ -71,13 +71,13 @@ end
 
 @testset "Anonymous Functions" begin
   f = x -> x+1
-  f2 = BSON.roundtrip(f)
+  f2 = BSON.roundtrip(f; compat=true)
   @test f2(5) == f(5)
   @test typeof(f2) !== typeof(f)
 
   chicken_tikka_masala(y) = x -> x+y
   f = chicken_tikka_masala(5)
-  f2 = BSON.roundtrip(f)
+  f2 = BSON.roundtrip(f; compat=true)
   @test f2(6) == f(6)
   @test typeof(f2) !== typeof(f)
 end
