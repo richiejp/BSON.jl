@@ -705,11 +705,15 @@ function parse(io::IO, ctx::ParseCtx)
   build_refs_indx!(io, ctx)
   parse_doc(io, ctx)
 end
-parse(path::String, ctx::ParseCtx) = open(path) do io
-  parse(io, ctx)
+parse(path::String, ctx::ParseCtx; mmap=false) = open(path) do io
+  if mmap
+    parse(IOBuffer(Mmap.mmap(io; shared=false)), ParseCtx())
+  else
+    parse(io, ParseCtx())
+  end
 end
 
-load(x) = parse(x, ParseCtx())
+load(x; opts...) = parse(x, ParseCtx(); opts...)
 
 function directtrip(ting::T) where {T}
   io = IOBuffer()

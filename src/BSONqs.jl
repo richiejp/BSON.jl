@@ -1,9 +1,9 @@
 module BSONqs
 
 using Core: SimpleVector, TypeName
-export bson
+import Mmap
 
-using Core: SimpleVector, TypeName
+export bson
 
 const BSONDict = Dict{Symbol,Any}
 const BSONArray = Vector{Any}

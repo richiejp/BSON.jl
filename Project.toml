@@ -5,6 +5,9 @@ license = "MIT"
 desc = "Mostly compatible Fork of BSON package with focus on composite type performance"
 version = "0.3.1"
 
+[deps]
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+
 [compat]
 julia = "1"
 
