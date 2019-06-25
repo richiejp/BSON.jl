@@ -50,10 +50,17 @@ lower(v::UnionAll) =
 lower(x::Vector{Any}) = copy(x)
 lower(x::Vector{UInt8}) = x
 
-function reinterpret_(::Type{T}, x) where T
+function reinterpret_(::Type{T}, x::Vector{S}) where {T, S}
+  length(x) < 1 && return T[]
+
   len = Int(length(x) * (sizeof(eltype(x)) / sizeof(T)))
+
   GC.@preserve x begin
-    return unsafe_wrap(Array, Ptr{T}(pointer(x)), len; own=true)
+    p = Ptr{UInt8}(pointer(x))
+    t = Ptr{UInt8}(Base.Libc.calloc(len, sizeof(T)))
+    ccall(:memset, Cvoid, (Ptr{UInt8}, Cint, Csize_t), t, 0, len * sizeof(T))
+    ccall(:memcpy, Cvoid, (Ptr{UInt8}, Ptr{UInt8}, Csize_t), t, p, sizeof(x))
+    Base.unsafe_wrap(Array, Ptr{T}(t), len; own=true)
   end
 end
 
