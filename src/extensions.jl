@@ -50,7 +50,7 @@ lower(v::UnionAll) =
 lower(x::Vector{Any}) = copy(x)
 lower(x::Vector{UInt8}) = x
 
-function reinterpret_(::Type{T}, x::Vector{S}) where {T, S}
+function reinterpret_(::Type{T}, x) where T
   length(x) < 1 && return T[]
 
   len = Int(length(x) * (sizeof(eltype(x)) / sizeof(T)))

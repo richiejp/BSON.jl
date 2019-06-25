@@ -137,6 +137,15 @@ function parse_bin(io::IO, ctx::ParseCtx)::Vector{UInt8}
   bin
 end
 
+parse_bin_unsafe(io, ctx) = parse_bin(io, ctx)
+function parse_bin_unsafe(io::IOBuffer, ctx::ParseCtx)::SubArray{UInt8, 1}
+  len = read(io, Int32)
+  subtype = read(io, 1)
+  bin = view(io.data, (io.ptr):(io.ptr + len - 1))
+  setref(bin, ctx)
+  bin
+end
+
 function parse_tag(io::IO, tag::BSONType, ctx::ParseCtx)
   if tag == null
     @asserteq ctx.curref -1
@@ -374,7 +383,7 @@ function load_bits_array(io::IO, ::Type{T}, sizes,
       fill(T(), sizes...)
     else
       @asserteq data.tag binary
-      reshape(reinterpret_(T, parse_bin(io, ctx)), sizes...)
+      reshape(reinterpret_(T, parse_bin_unsafe(io, ctx)), sizes...)
     end
 
     setref(arr, ctx)
@@ -487,7 +496,7 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
       quote
         $expr
         @asserteq dtag binary
-        bits = parse_bin(io, ctx)
+        bits = parse_bin_unsafe(io, ctx)
         ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), $T, bits)
       end
     elseif T <: Dict
@@ -519,7 +528,7 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
     if isprimitive(T)
       @assert isbitstype(T)
       @asserteq dtag binary
-      bits = parse_bin(io, ctx)
+      bits = parse_bin_unsafe(io, ctx)
       ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), T, bits)
     elseif T <: Dict
       load_dict!(io, T(), ctx)
