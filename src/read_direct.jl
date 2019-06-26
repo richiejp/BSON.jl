@@ -220,7 +220,7 @@ function parse_specific(io::IO, ::Type{T}, tag::BSONType,
       return :(parse_tag(io, tag, ctx))
     end
 
-    expr = quote
+    quote
       startpos = position(io)
       len = read(io, Int32)
       local data::BSONElem
@@ -491,18 +491,17 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
   #@info "Load struct" T
 
   if @generated
-    expr = if isprimitive(T)
+    if isprimitive(T)
       @assert isbitstype(T)
       quote
-        $expr
         @asserteq dtag binary
         bits = parse_bin_unsafe(io, ctx)
         ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), $T, bits)
       end
     elseif T <: Dict
-      :($expr; load_dict!(io, $T(), ctx))
+      :(load_dict!(io, $T(), ctx))
     elseif fieldcount(T) < 1
-      :($expr; $T())
+      :($T())
     else
       n = fieldcount(T)
       @assert n > 0
