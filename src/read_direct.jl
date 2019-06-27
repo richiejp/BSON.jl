@@ -210,6 +210,44 @@ function parse_specific(io::IO, ::Type{BSONDict},
   parse_any_doc(io, ctx)
 end
 
+function parse_specific(io::IO, ::Type{DataType},
+                        tag::BSONType, ctx::ParseCtx)::DataType
+  @asserteq tag document
+  len = read(io, Int32)
+  local name, params
+  ref = nothing
+
+  for _ in 1:4
+    if (tag = read(io, BSONType)) == eof
+      break
+    end
+
+    k = parse_cstr_unsafe(io)
+    if k == b"tag"
+      @asserteq tag string
+    elseif k == b"name"
+      name = BSONElem(tag, io)
+    elseif k == b"params"
+      params = BSONElem(tag, io)
+    elseif k == b"ref"
+      ref = BSONElem(tag, io)
+    else
+      error("Expected tag, name, ref or params, but got '$(String(k))'")
+    end
+
+    skip_over(io, tag)
+  end
+  endpos = position(io)
+
+  T = if ref ≠ nothing
+    parse_specific_ref(io, DataType, ref, ctx)::DataType
+  else
+    parse_type(io, name, params, ctx)
+  end
+  seek(io, endpos)
+  T
+end
+
 function parse_specific(io::IO, ::Type{T}, tag::BSONType,
                         ctx::ParseCtx)::T where T
   @asserteq tag document
@@ -324,35 +362,8 @@ end
 parse_specific(::IO, ::Type{Function}, ::BSONType, ::ParseCtx) =
   error("Functions are not supported, use load_compat")
 
-function parse_type(io::IO, ctx::ParseCtx)::Type
-  len = read(io, Int32)
-  local params, name
-
-  for _ in 1:3
-    if (tag = read(io, BSONType)) == eof
-      break
-    end
-
-    if k == b"tag"
-      @asserteq tag string
-      skip_over(io, tag)
-    elseif k == "name"
-      name = BSONElem(tag, io)
-      skip_over(io, tag)
-    elseif k == "params"
-      params = BSONElem(tag, io)
-      skip_over(io, tag)
-    end
-  end
-  endpos = position(io)
-
-  T = parse_type(io, name, params, ctx)
-  seek(io, endpos)
-  T
-end
-
 function parse_type(io::IO,
-                    name::BSONElem, params::BSONElem, ctx::ParseCtx)::Type
+                    name::BSONElem, params::BSONElem, ctx::ParseCtx)::DataType
   @asserteq name.tag array
   @asserteq params.tag array
   curref = ctx.curref
@@ -564,8 +575,7 @@ function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
   ctx.curref = -1
 
   seek(io, ttype.pos)
-  @asserteq ttype.tag document
-  T = parse_doc(io, ctx)::Type
+  T = parse_specific(io, DataType, ttype.tag, ctx)::DataType
   #@info "New struct type" T
 
   seek(io, data.pos)
