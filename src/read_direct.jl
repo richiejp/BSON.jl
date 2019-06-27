@@ -317,6 +317,9 @@ function parse_specific(io::IO, ::Type{Array{T, N}}, tag::BSONType,
   end
 end
 
+parse_specific(::IO, ::Type{Function}, ::BSONType, ::ParseCtx) =
+  error("Functions are not supported, use load_compat")
+
 function parse_type(io::IO, ctx::ParseCtx)::Type
   len = read(io, Int32)
   local params, name
@@ -679,7 +682,7 @@ function parse_doc(io::IO, ctx::ParseCtx)
   elseif only_saw(SEEN_TAG | SEEN_TAG_UNION)
     Union{}
   elseif only_saw(SEEN_TAG | SEEN_TYPENAME | SEEN_PARAMS | SEEN_TAG_ANON)
-    error("Anon functions not implemented")
+    error("Functions are not supported, use load_compat")
   elseif only_saw(SEEN_TAG | SEEN_PATH | SEEN_TAG_REF)
     error("Refs not implemented")
   elseif only_saw(SEEN_TAG | SEEN_TYPE | SEEN_SIZE | SEEN_DATA | SEEN_TAG_ARRAY)
