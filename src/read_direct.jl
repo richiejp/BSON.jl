@@ -167,6 +167,15 @@ function parse_tag(io::IO, tag::BSONType, ctx::ParseCtx)
   end
 end
 
+function parse_symbol(io::IO, name::BSONElem, ctx::ParseCtx)
+  @asserteq name.tag string
+  seek(io, name.pos)
+  len = read(io, Int32)-1
+  cstr = parse_cstr_unsafe(io)
+  @asserteq len length(cstr)
+  ccall(:jl_symbol_n, Symbol, (Ptr{UInt8}, Int), cstr, len)
+end
+
 for (T, expected) in (Nothing => null,
                       Bool => boolean,
                       Int32 => int32,
@@ -189,6 +198,36 @@ function parse_specific(io::IO, ::Type{String},
   eof = read(io, 1)
   #@info "Parse specific string" s
   s
+end
+
+function parse_specific(io::IO, ::Type{Symbol},
+                        tag::BSONType, ctx::ParseCtx)::Symbol
+  @asserteq tag document
+
+  len = read(io, Int32)
+  local name
+
+  for _ in 1:3
+    if (tag = read(io, BSONType)) == eof
+      break
+    end
+
+    k = parse_cstr_unsafe(io)
+    if k == b"tag"
+      @asserteq tag string
+    elseif k == b"name"
+      name = BSONElem(tag, io)
+    else
+      error("Expected tag or name, but got '$(String(k))'")
+    end
+
+    skip_over(io, tag)
+  end
+  endpos = position(io)
+
+  ret = parse_symbol(io, name, ctx)
+  seek(io, endpos)
+  ret
 end
 
 function parse_specific(io::IO, ::Type{Vector{UInt8}},
@@ -431,7 +470,7 @@ function parse_array(io::IO, ttype::BSONElem, size::BSONElem,
   ctx.curref = -1
 
   seek(io, ttype.pos)
-  T::Type = parse_tag(io, ttype.tag, ctx)
+  T = parse_specific(io, DataType, ttype.tag, ctx)::DataType
   #@info "New array type" T
 
   ctx.curref = curref
@@ -559,8 +598,8 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
 
       for i in 1:nfields(x)
         tag = parse_array_tag(io, ctx)
-        field = parse_tag(io, tag, ctx)
-        f = convert(fieldtype(T, i), field)
+        FT = fieldtype(T, i)
+        f = parse_specific(io, FT, tag, ctx)::FT
         ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, i-1, f)
       end
 
@@ -680,11 +719,7 @@ function parse_doc(io::IO, ctx::ParseCtx)
     parse_type(io, tname, tparams, ctx)
   elseif only_saw(SEEN_TAG | SEEN_NAME | SEEN_TAG_SYMBOL)
     #@info "Found Symbol" tname
-    seek(io, tname.pos)
-    len = read(io, Int32)-1
-    cstr = parse_cstr_unsafe(io)
-    @asserteq len length(cstr)
-    ccall(:jl_symbol_n, Symbol, (Ptr{UInt8}, Int), cstr, len)
+    parse_symbol(io, tname, ctx)
   elseif only_saw(SEEN_TAG | SEEN_DATA | SEEN_TAG_TUPLE)
     #@info "Found Tuple" tdata
     seek(io, tdata.pos)

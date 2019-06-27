@@ -49,6 +49,7 @@ end
   @test roundtrip_equal(Dict("a"=>1))
   @test roundtrip_equal(T(()))
   @test roundtrip_equal(T{Bar}(Baz()))
+  @test roundtrip_equal(T{Symbol}(:wibble))
 end
 
 @testset "Circular References" begin
