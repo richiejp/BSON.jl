@@ -307,11 +307,15 @@ function parse_specific(io::IO, ::Type{Array{T, N}}, tag::BSONType,
       seek(io, data.pos)
     end
 
-    if isbitstype(T)
-      :($expr; load_bits_array(io, $T, sizes, data, ctx))
+    expr = if isbitstype(T)
+      :($expr; ret = load_bits_array(io, $T, sizes, data, ctx))
     else
-      :($expr; load_array(io, $T, sizes, ctx))
+      :($expr; ret = load_array(io, $T, sizes, ctx))
     end
+
+    :($expr;
+      seek(io, endpos);
+      ret)
   else
     parse_doc(io, ctx)
   end
