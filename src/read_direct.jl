@@ -12,6 +12,9 @@ macro asserteq(x, y)
   end
 end
 
+symbol_n(cstr::Union{Vector{UInt8}, SubArray{UInt8, 1}}, len) =
+  ccall(:jl_symbol_n, Symbol, (Ptr{UInt8}, Int), cstr, len)
+
 struct BSONElem
   tag::BSONType
   pos::Int
@@ -26,6 +29,61 @@ mutable struct ParseCtx
 end
 
 ParseCtx() = ParseCtx([], [], -1)
+
+struct Document{IOT <: IO, DET}
+  io::IOT
+  ctx::ParseCtx
+  index::Dict{Symbol, Int}
+  elems::Vector{Pair{Symbol, BSONElem}}
+end
+
+function Document(io::IO, ::Type{DET}, ctx::ParseCtx) where DET
+  len = read(io, Int32)
+  index = Dict{Symbol, Int}()
+  elems = Pair{Symbol, BSONElem}[]
+
+  while (tag = read(io, BSONType)) ≠ eof
+    name = parse_cstr_unsafe(io)
+    nsym = symbol_n(name, length(name))
+
+    push!(elems, nsym => BSONElem(tag, position(io)))
+    index[nsym] = length(elems)
+
+    skip_over(io, tag)
+  end
+
+  Document{typeof(io), DET}(io, ctx, index, elems)
+end
+
+function Document(io::IO, ::Type{DET}) where DET
+  doc = Document(io, DET, ParseCtx())
+
+  build_refs_indx!(io, doc, doc.ctx)
+  doc
+end
+Document(io::IO) = Document(io, Any)
+
+Base.getindex(doc::Document{IOT, DET}, key::Symbol) where {IOT, DET} = doc[DET, key]
+function Base.getindex(doc::Document, ::Type{ET}, key::Symbol)::ET where ET
+  elem = doc.elems[doc.index[key]].second
+  seek(doc.io, elem.pos)
+  parse_specific(doc.io, ET, elem.tag, doc.ctx)
+end
+
+Base.iterate(doc::Document) = iterate(doc, 1)
+function Base.iterate(doc::Document{IOT, DET}, i::Int) where {IOT, DET}
+  if i > length(doc.elems)
+    return nothing
+  end
+
+  (name, elem) = doc.elems[i]
+  if name == :_backrefs
+    iterate(doc, i + 1)
+  else
+    seek(doc.io, elem.pos)
+    (name => parse_specific(doc.io, DET, elem.tag, doc.ctx), i + 1)
+  end
+end
 
 struct ParseArrayIter{IOT <: IO, ET}
   io::IOT
@@ -87,38 +145,26 @@ function skip_over(io::IO, tag::BSONType)
 end
 
 "Create an index into the _backrefs entry in the root document"
-function build_refs_indx!(io::IO, ctx::ParseCtx)
-  # read the length of the root document
-  len = read(io, Int32)
-  #@info "BSON document is $len bytes"
+function build_refs_indx!(io::IO, doc::Document, ctx::ParseCtx)
+  i = get(doc.index, :_backrefs, nothing)
+  i == nothing && return
+  elem = doc.elems[i].second
 
-  while (tag = read(io, BSONType)) ≠ eof
-    name = parse_cstr_unsafe(io)
-    #@info "Element head" String(name) tag position(io)
-
-    if name == b"_backrefs"
-      if tag != array
-        error("_backrefs is not an array; tag = $tag")
-      end
-
-      len = read(io, Int32)
-      #@info "Processing _backrefs" position(io) len
-
-      while (tag = read(io, BSONType)) ≠ eof
-        while read(io, UInt8) ≠ 0x00 end
-
-        push!(ctx.refindx, BSONElem(tag, position(io)))
-        push!(ctx.refs, nothing)
-        skip_over(io, tag)
-      end
-    else
-      #@info "Skipping $(String(name))"
-      skip_over(io, tag)
-    end
+  if elem.tag != array
+    error("_backrefs is not an array; tag = $(elem.tag)")
   end
 
-  #@info "Finished building refs index" ctx
-  seek(io, 0)
+  seek(io, elem.pos)
+  len = read(io, Int32)
+  #@info "Processing _backrefs" position(io) len
+
+  while (tag = read(io, BSONType)) ≠ eof
+    while read(io, UInt8) ≠ 0x00 end
+
+    push!(ctx.refindx, BSONElem(tag, position(io)))
+    push!(ctx.refs, nothing)
+    skip_over(io, tag)
+  end
 end
 
 function setref(obj, ctx::ParseCtx)
@@ -173,7 +219,7 @@ function parse_symbol(io::IO, name::BSONElem, ctx::ParseCtx)
   len = read(io, Int32)-1
   cstr = parse_cstr_unsafe(io)
   @asserteq len length(cstr)
-  ccall(:jl_symbol_n, Symbol, (Ptr{UInt8}, Int), cstr, len)
+  symbol_n(cstr, len)
 end
 
 for (T, expected) in (Nothing => null,
@@ -189,6 +235,9 @@ for (T, expected) in (Nothing => null,
     end
   end
 end
+
+parse_specific(io::IO, ::Type{Any}, tag::BSONType, ctx::ParseCtx) =
+  parse_tag(io, tag, ctx)
 
 function parse_specific(io::IO, ::Type{String},
                         tag::BSONType, ctx::ParseCtx)::String
@@ -246,7 +295,7 @@ end
 function parse_specific(io::IO, ::Type{BSONDict},
                         tag::BSONType, ctx::ParseCtx)::BSONDict
   @asserteq tag document
-  parse_any_doc(io, ctx)
+  parse_doc(io, Any, ctx)
 end
 
 function parse_specific(io::IO, ::Type{DataType},
@@ -623,15 +672,16 @@ function parse_struct(io::IO, ttype::BSONElem, data::BSONElem, ctx::ParseCtx)
   load_struct(io, T, data.tag, ctx)
 end
 
-function parse_any_doc(io::IO, ctx::ParseCtx)::BSONDict
+function parse_doc(io::IO, ::Type{V},
+                   ctx::ParseCtx)::Dict{Symbol, V} where V
   len = read(io, Int32)
-  dic = BSONDict()
+  dic = Dict{Symbol, V}()
   setref(dic, ctx)
 
   while (tag = read(io, BSONType)) ≠ eof
     cstr = parse_cstr_unsafe(io)
-    k = ccall(:jl_symbol_n, Symbol, (Ptr{UInt8}, Int), cstr, length(cstr))
-    dic[k] = parse_tag(io, tag, ctx)
+    k = symbol_n(cstr, length(cstr))
+    dic[k] = parse_specific(io, V, tag, ctx)
   end
 
   dic
@@ -749,18 +799,28 @@ function parse_doc(io::IO, ctx::ParseCtx)
   #@info "Found plain dictionary"
   # This doc doesn't appear to be tagged with all the necessay julia type info
   seek(io, startpos)
-  parse_any_doc(io, ctx)
+  parse_doc(io, Any, ctx)
 end
 
 function parse(io::IO, ctx::ParseCtx)
-  build_refs_indx!(io, ctx)
-  parse_doc(io, ctx)
-end
-parse(path::String, ctx::ParseCtx; mmap=false) = open(path) do io
-  if mmap
-    parse(IOBuffer(Mmap.mmap(io; shared=false)), ParseCtx())
+  doc = Document(io, Any, ctx)
+  build_refs_indx!(io, doc, ctx)
+
+  # The root document is usually a plain BSONDict, but it can also be a Julia
+  # struct or some other type if the user figures out how to cause that
+  if haskey(doc.index, :tag)
+    seek(io, 0)
+    parse_doc(io, ctx)
   else
-    parse(io, ParseCtx())
+    BSONDict(doc)
+  end
+end
+
+parse(path::String, ctx::ParseCtx; mmap=false, opts...) = open(path) do io
+  if mmap
+    parse(IOBuffer(Mmap.mmap(io; shared=false)), ctx; opts...)
+  else
+    parse(io, ctx; opts...)
   end
 end
 
@@ -770,12 +830,11 @@ function directtrip(ting::T) where {T}
   io = IOBuffer()
   bson(io, Dict(:stuff => ting))
   seek(io, 0)
-  ctx = ParseCtx()
-  build_refs_indx!(io, ctx)
+  doc = Document(io, T)
   try
-    parse_doc(io, ctx)[:stuff]::T
+    doc[:stuff]::T
   catch e
-    @error "Error during parsing" io ctx
+    @error "Error during parsing" io doc.ctx
     rethrow(e)
   end
 end

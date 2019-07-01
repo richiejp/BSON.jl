@@ -291,11 +291,16 @@ parse(path::String) = open(parse, path)
 
 load_compat(x) = raise_recursive(parse(x), IdDict{Any, Any}())
 
-function roundtrip(x; compat = false)
+function roundtrip(x, flags...)
   buf = IOBuffer()
   bson(buf, Dict(:stuff => x))
   seek(buf, 0)
-  (compat ? load_compat(buf) : load(buf))[:stuff]
+  if :set_root_type in flags
+    doc = Document(buf, typeof(x))
+    doc[:stuff]
+  else
+    (:compat in flags ? load_compat(buf) : load(buf))[:stuff]
+  end
 end
 
 function halftrip(x)

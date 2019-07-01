@@ -36,6 +36,41 @@ args...)`, but that `parse(x)` is not the same as `load_compat(x)`.
 On Linux atleast you can set `mmap=true` for better perfomance when loading
 from a file.
 
+### Partial loading
+
+Finally there is an experimental interface for lazily loading a BSON document
+one member at a time. This also allows you to specify the type of each
+document member.
+
+```julia
+import Mmap
+
+open("a_file.bson") do fio
+  io = IOBuffer(Mmap.mmap(fio))
+  doc = Document(io, DefaultMemberType)
+
+  # Get a doc member, parsing it as the DefaultMemberType
+  val = doc[:a_member_key]
+  # Get a doc member, parsing it as T
+  val = doc[T, :a_member_key]
+
+  # iterate over all the members, parsing them as DefaultMemberType
+  for (k, v) in doc
+    ...
+  end
+
+# Load the entire document into a Dict, again using DefaultMemberType
+  Dict(doc)
+end
+```
+
+Lazy or partial loading could be useful if you have a large document with many
+large members. I have used the word 'partial', because calling `Document` will
+scan the input stream and build an index which may not be considered lazy
+enough. Note that there is no automatic caching of parsed results.
+
+Specifying a concrete type allows some parsing to be skipped.
+
 ## Performance hints
 
 This library works best with large, repetitive datasets with concrete
