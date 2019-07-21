@@ -28,6 +28,7 @@ struct Baz <: Bar end
   @test roundtrip_equal(UInt8[1,2,3])
   @test roundtrip_equal("b")
   @test roundtrip_equal([1,"b"])
+  @test roundtrip_equal([[1, 2, 3], "foo"])
   @test roundtrip_equal(Tuple, :compat)
 end
 

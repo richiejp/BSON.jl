@@ -467,17 +467,43 @@ function parse_type(io::IO,
   p
 end
 
-function parse_any_array(io::IO, ctx::ParseCtx)::BSONArray
+function parse_any_array(io::IO, ctx::ParseCtx)
   len = read(io, Int32)
-  ps = BSONArray()
-  setref(ps, ctx)
 
-  while (tag = read(io, BSONType)) ≠ eof
-    # Note that arrays are dicts with the index as the key
-    while read(io, UInt8) != 0x00
-      nothing
+  # If this array has a reference, then it might reference itself.
+  if ctx.curref ≠ -1
+    ps = BSONArray()
+    setref(ps, ctx)
+
+    while (tag = parse_array_tag(io, ctx)) ≠ eof
+      push!(ps, parse_tag(io, tag, ctx))
     end
-    push!(ps, parse_tag(io, tag, ctx))
+
+    ps
+  else
+    # If it is not referenced then we can recreate the array with a wider type
+    # as we discover new types (see base/array.jl)
+    tag = parse_array_tag(io, ctx)
+    tag ≠ eof || return BSONArray()
+    ps = [parse_tag(io, tag, ctx)]
+
+    parse_any_array!(io::IO, ps, ctx)
+  end
+end
+
+function parse_any_array!(io::IO, ps::Vector{T}, ctx::ParseCtx) where T
+  while (tag = parse_array_tag(io, ctx)) ≠ eof
+    e = parse_tag(io, tag, ctx)
+
+    if e isa T || typeof(e) === T
+      push!(ps, e::T)
+    else
+      new = sizehint!(empty(ps, Base.typejoin(T, typeof(e))), length(ps))
+
+      append!(new, ps)
+      push!(new, e)
+      return parse_any_array!(io, new, ctx)
+    end
   end
 
   ps
