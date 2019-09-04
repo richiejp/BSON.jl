@@ -443,7 +443,7 @@ function parse_specific(io::IO, ::Type{Array{T, N}}, tag::BSONType,
       seek(io, endpos);
       ret)
   else
-    parse_doc(io, ctx)
+    parse_tag(io, tag, ctx)
   end
 end
 
