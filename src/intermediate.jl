@@ -55,7 +55,7 @@ end
 
 mutable struct TaggedStruct <: TaggedStructType
   ttype::TaggedStructType
-  data::BSONArray
+  data::Union{BSONArray, Vector{UInt8}}
 end
 
 mutable struct TaggedArray <: Tagged
@@ -104,7 +104,7 @@ end
 function applychildren!(f::Function, ts::TaggedStruct)::TaggedStruct
   ts.ttype = f(ts.ttype)
   if ts.data != nothing
-    ts.data = f(ts.data::BSONArray)
+    ts.data = f(ts.data)
   end
   ts
 end
