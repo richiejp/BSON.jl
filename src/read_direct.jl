@@ -623,6 +623,8 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
   #@info "Load struct" T
 
   if @generated
+    n = fieldcount(T)
+
     if isprimitive(T)
       @assert isbitstype(T)
       quote
@@ -632,20 +634,27 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
       end
     elseif T <: Dict
       :(load_dict!(io, $T(), ctx))
-    elseif fieldcount(T) < 1
+    elseif n < 1
       :($T())
-    else
-      n = fieldcount(T)
-      @assert n > 0
-      FT = fieldtype(T, 1)
+    elseif !ismutable(T)
+      block = :(x = Vector{Any}(undef, $n);
+                parse_array_len(io, ctx))
 
+      for i in 1:n
+        FT = fieldtype(T, i)
+        block = :($block;
+                  tag = parse_array_tag(io, ctx);
+                  x[$i] = parse_specific(io, $FT, tag, ctx)::$FT)
+      end
+
+      :($block;
+        ccall(:jl_new_structv, Any, (Any,Ptr{Cvoid},UInt32), $T, x, $n))
+    else
       block = :(x = ccall(:jl_new_struct_uninit, Any, (Any,), $T);
                 setref(x, ctx);
-                parse_array_len(io, ctx);
-                tag = parse_array_tag(io, ctx);
-                f = parse_specific(io, $FT, tag, ctx)::$FT;
-                ccall(:jl_set_nth_field, Nothing, (Any, Csize_t, Any), x, 0, f))
-      for i in 2:n
+                parse_array_len(io, ctx))
+
+      for i in 1:n
         FT = fieldtype(T, i)
         block = :($block;
                   tag = parse_array_tag(io, ctx);
@@ -656,6 +665,8 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
       :($block; x)
     end
   else
+    n = fieldcount(T)
+
     if isprimitive(T)
       @assert isbitstype(T)
       @asserteq dtag binary
@@ -663,15 +674,26 @@ function load_struct(io::IO, ::Type{T}, dtag::BSONType, ctx::ParseCtx)::T where 
       ccall(:jl_new_bits, Any, (Any, Ptr{Cvoid}), T, bits)
     elseif T <: Dict
       load_dict!(io, T(), ctx)
-    elseif fieldcount(T) < 1
+    elseif n < 1
       T()
+    elseif !ismutable(T)
+      x = Vector{Any}(undef, n)
+      parse_array_len(io, ctx)
+
+      for i in 1:n
+        FT = fieldtype(T, i)
+        tag = parse_array_tag(io, ctx)
+        x[i] = parse_specific(io, FT, tag, ctx)::FT
+      end
+
+      ccall(:jl_new_structv, Any, (Any,Ptr{Cvoid},UInt32), T, x, n)
     else
       @asserteq dtag array
 
       x = ccall(:jl_new_struct_uninit, Any, (Any,), T)
       setref(x, ctx)
 
-      for i in 1:nfields(x)
+      for i in 1:n
         tag = parse_array_tag(io, ctx)
         FT = fieldtype(T, i)
         f = parse_specific(io, FT, tag, ctx)::FT
